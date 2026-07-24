@@ -1,0 +1,188 @@
+Describe lsp#internal#completion#ranking#rank
+    Before each
+        new
+        setlocal iskeyword=@,48-57,_,192-255
+        call setline(1, [''])
+    End
+
+    After each
+        bwipe!
+    End
+
+    It ranks a full match ahead of a scattered match
+        let items = [{'label': 'f_o_o'}, {'label': 'foo'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'foo'})
+        Assert Equals(map(got, {_, item -> item.label}), ['foo', 'f_o_o'])
+    End
+
+    It ranks a case-correct prefix ahead of a weaker match
+        let items = [{'label': 'foobar'}, {'label': 'FooBar'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'Fo'})
+        Assert Equals(map(got, {_, item -> item.label}), ['FooBar', 'foobar'])
+    End
+
+    It uses camel-case and separator boundaries from matchfuzzypos
+        let items = [{'label': 'foobar'}, {'label': 'FooBar'}, {'label': 'foo_bar'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'fb'})
+        Assert Equals(map(got, {_, item -> item.label}), ['foo_bar', 'FooBar', 'foobar'])
+    End
+
+    It uses filterText instead of label
+        let items = [
+            \ {'label': 'first', 'filterText': 'zz'},
+            \ {'label': 'second', 'filterText': 'foo'},
+            \ ]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'foo'})
+        Assert Equals(map(got, {_, item -> item.label}), ['second', 'first'])
+    End
+
+    It uses sortText after equal fuzzy scores
+        let items = [
+            \ {'label': 'fooTwo', 'sortText': 'b'},
+            \ {'label': 'fooOne', 'sortText': 'a'},
+            \ ]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'foo'})
+        Assert Equals(map(got, {_, item -> item.label}), ['fooOne', 'fooTwo'])
+    End
+
+    It uses nearer occurrences after equal fuzzy and sortText
+        call setline(1, ['nearby faraway', '', '', 'faraway', '', 'ne'])
+        let items = [
+            \ {'label': 'nearby', 'sortText': 'same'},
+            \ {'label': 'faraway', 'sortText': 'same'},
+            \ ]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': bufnr('%'),
+            \ 'position': {'line': 5, 'character': 2},
+            \ 'start_character': 0,
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> item.label}), ['faraway', 'nearby'])
+    End
+
+    It gives keywords and snippets neutral locality
+        call setline(1, ['nearby nearby', '', 'ne'])
+        let items = [
+            \ {'label': 'unseen', 'sortText': 'same', 'kind': 6},
+            \ {'label': 'nearby', 'sortText': 'same', 'kind': 14},
+            \ {'label': 'nearby', 'sortText': 'same', 'kind': 15},
+            \ ]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': bufnr('%'),
+            \ 'position': {'line': 2, 'character': 2},
+            \ 'start_character': 0,
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> get(item, 'kind', 0)}), [6, 14, 15])
+    End
+
+    It excludes the current incomplete word from locality
+        call setline(1, ['local'])
+        let items = [
+            \ {'label': 'other', 'sortText': 'same'},
+            \ {'label': 'local', 'sortText': 'same'},
+            \ ]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': bufnr('%'),
+            \ 'position': {'line': 0, 'character': 5},
+            \ 'start_character': 0,
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> item.label}), ['other', 'local'])
+    End
+
+    It allows locality to decide when sortText is missing
+        call setline(1, ['nearby', '', 'x'])
+        let items = [
+            \ {'label': 'unseen', 'sortText': 'a'},
+            \ {'label': 'nearby'},
+            \ ]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': bufnr('%'),
+            \ 'position': {'line': 2, 'character': 1},
+            \ 'start_character': 0,
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> item.label}), ['nearby', 'unseen'])
+    End
+
+    It uses shorter filter text as the fallback
+        let items = [{'label': 'longer'}, {'label': 'short'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': ''})
+        Assert Equals(map(got, {_, item -> item.label}), ['short', 'longer'])
+    End
+
+    It preserves original order for complete ties
+        let items = [{'label': 'same', 'data': 1}, {'label': 'same', 'data': 2}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'same'})
+        Assert Equals(map(got, {_, item -> item.data}), [1, 2])
+    End
+
+    It ranks an empty base deterministically
+        let items = [{'label': 'longer'}, {'label': 'x'}, {'label': 'same'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': ''})
+        Assert Equals(map(got, {_, item -> item.label}), ['x', 'same', 'longer'])
+    End
+
+    It handles multibyte labels and buffer text
+        call setline(1, ['ångström', '', 'å'])
+        let items = [
+            \ {'label': 'unseen', 'sortText': 'same'},
+            \ {'label': 'ångström', 'sortText': 'same'},
+            \ ]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': bufnr('%'),
+            \ 'position': {'line': 2, 'character': 1},
+            \ 'start_character': 0,
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> item.label}), ['ångström', 'unseen'])
+    End
+
+    It falls back neutrally for an unloaded buffer
+        let items = [{'label': 'longer'}, {'label': 'x'}]
+        let context = {
+            \ 'base': '',
+            \ 'bufnr': 999999,
+            \ 'position': {'line': 0, 'character': 0},
+            \ 'locality': v:true,
+            \ }
+        let got = lsp#internal#completion#ranking#rank(items, context)
+        Assert Equals(map(got, {_, item -> item.label}), ['x', 'longer'])
+    End
+
+    It preserves server order above max
+        let items = [{'label': 'three'}, {'label': 'one'}, {'label': 'two'}]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': '', 'max': 2})
+        Assert Equals(got, items)
+    End
+
+    It does not mutate the input list
+        let items = [{'label': 'longer'}, {'label': 'x'}]
+        let before = deepcopy(items)
+        call lsp#internal#completion#ranking#rank(items, {'base': ''})
+        Assert Equals(items, before)
+    End
+
+    It has a deterministic non-fuzzy fallback
+        let g:lsp_ignorecase = v:true
+        let items = [
+            \ {'label': 'unrelated'},
+            \ {'label': 'Foobar'},
+            \ {'label': 'foobar'},
+            \ {'label': 'foo'},
+            \ ]
+        let got = lsp#internal#completion#ranking#rank(items, {'base': 'foo', 'fuzzy': v:false})
+        Assert Equals(map(got, {_, item -> item.label}), ['foo', 'foobar', 'Foobar', 'unrelated'])
+    End
+End
