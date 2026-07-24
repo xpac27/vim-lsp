@@ -1,3 +1,5 @@
+scriptencoding utf-8
+
 Describe lsp#internal#completion#ranking#rank
     Before each
         new
