@@ -661,4 +661,57 @@ Describe lsp#omni
             End
         End
     End
+
+    Describe lsp#omni#_filter_completion_items
+        It should fuzzy filter and score matches
+            let items = [
+            \ {'word': 'f_o_o'},
+            \ {'word': 'foo'},
+            \ {'word': 'bar'},
+            \ ]
+
+            let got = lsp#omni#_filter_completion_items(items, 'foo', 'fuzzy')
+            Assert Equals(map(got, {_, item -> item.word}), ['foo', 'f_o_o'])
+        End
+
+        It should fuzzy filter with LSP filterText
+            let raw_items = [
+            \ {'label': 'unrelated', 'filterText': 'foo'},
+            \ {'label': 'bar'},
+            \ ]
+            let converted = lsp#omni#get_vim_completion_items({
+            \ 'server': {'name': 'dummy-server'},
+            \ 'position': lsp#get_position(),
+            \ 'response': {'result': raw_items},
+            \ }).items
+
+            let got = lsp#omni#_filter_completion_items(converted, 'foo', 'fuzzy')
+            Assert Equals(map(got, {_, item -> item.word}), ['unrelated'])
+        End
+
+        It should fall back to prefix filtering when fuzzy matching is disabled
+            let items = [
+            \ {'word': 'f_o_o'},
+            \ {'word': 'foo'},
+            \ ]
+
+            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy', v:false)
+            Assert Equals(map(got, {_, item -> item.word}), ['foo'])
+        End
+
+        It should preserve incoming order for equal fuzzy scores
+            let raw_items = [
+            \ {'label': 'zeta', 'filterText': 'foo'},
+            \ {'label': 'alpha', 'filterText': 'foo'},
+            \ ]
+            let converted = lsp#omni#get_vim_completion_items({
+            \ 'server': {'name': 'dummy-server'},
+            \ 'position': lsp#get_position(),
+            \ 'response': {'result': raw_items},
+            \ }).items
+
+            let got = lsp#omni#_filter_completion_items(converted, 'foo', 'fuzzy')
+            Assert Equals(map(got, {_, item -> item.word}), ['zeta', 'alpha'])
+        End
+    End
 End

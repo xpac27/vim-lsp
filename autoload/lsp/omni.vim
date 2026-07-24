@@ -120,6 +120,58 @@ function! s:contains_filter(item, last_typed_word) abort
     endif
 endfunction
 
+function! s:compare_fuzzy_filter_records(left, right) abort
+    if a:left['score'] != a:right['score']
+        return a:left['score'] > a:right['score'] ? -1 : 1
+    endif
+    return a:left['index'] == a:right['index'] ? 0 : a:left['index'] < a:right['index'] ? -1 : 1
+endfunction
+
+function! s:fuzzy_filter(items, last_typed_word, use_matchfuzzy) abort
+    if empty(a:items) || empty(a:last_typed_word)
+        return copy(a:items)
+    endif
+    if !a:use_matchfuzzy || !exists('*matchfuzzypos')
+        return filter(copy(a:items), {_, item -> s:prefix_filter(item, a:last_typed_word)})
+    endif
+
+    let l:records = []
+    for l:index in range(len(a:items))
+        let l:item = a:items[l:index]
+        let l:filter_text = s:get_filter_text(l:item)
+        call add(l:records, {
+            \ 'index': l:index,
+            \ 'item': l:item,
+            \ 'text': empty(l:filter_text) ? s:get_filter_label(l:item) : l:filter_text,
+            \ })
+    endfor
+
+    let l:result = matchfuzzypos(l:records, a:last_typed_word, {'key': 'text'})
+    let l:matches = []
+    if !empty(l:result[0])
+        for l:index in range(len(l:result[0]))
+            call add(l:matches, {
+                \ 'index': l:result[0][l:index]['index'],
+                \ 'item': l:result[0][l:index]['item'],
+                \ 'score': l:result[2][l:index],
+                \ })
+        endfor
+    endif
+    call sort(l:matches, function('s:compare_fuzzy_filter_records'))
+    return map(l:matches, {_, record -> record['item']})
+endfunction
+
+function! lsp#omni#_filter_completion_items(items, last_typed_word, filter_name, ...) abort
+    if a:filter_name ==? 'prefix'
+        return filter(copy(a:items), {_, item -> s:prefix_filter(item, a:last_typed_word)})
+    elseif a:filter_name ==? 'contains'
+        return filter(copy(a:items), {_, item -> s:contains_filter(item, a:last_typed_word)})
+    elseif a:filter_name ==? 'fuzzy'
+        return s:fuzzy_filter(a:items, a:last_typed_word, get(a:, 1, v:true))
+    endif
+    return copy(a:items)
+endfunction
+
 let s:pair = {
 \  '"':  '"',
 \  '''':  '''',
@@ -137,8 +189,8 @@ function! s:display_completions(timer, info) abort
     let l:last_typed_word = strpart(l:current_line, s:completion['startcol'] - 1)
 
     let l:filter = has_key(l:server_info, 'config') && has_key(l:server_info['config'], 'filter') ? l:server_info['config']['filter'] : { 'name': 'prefix' }
+    let s:completion['matches'] = lsp#omni#_filter_completion_items(s:completion['matches'], l:last_typed_word, l:filter['name'])
     if l:filter['name'] ==? 'prefix'
-        let s:completion['matches'] = filter(s:completion['matches'], {_, item -> s:prefix_filter(item, l:last_typed_word)})
         if has_key(s:pair, l:last_typed_word[0])
             let [l:lhs, l:rhs] = [l:last_typed_word[0], s:pair[l:last_typed_word[0]]]
             for l:item in s:completion['matches']
@@ -148,8 +200,6 @@ function! s:display_completions(timer, info) abort
                 endif
             endfor
         endif
-    elseif l:filter['name'] ==? 'contains'
-        let s:completion['matches'] = filter(s:completion['matches'], {_, item -> s:contains_filter(item, l:last_typed_word)})
     endif
 
     let s:completion['status'] = ''

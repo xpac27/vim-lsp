@@ -1504,23 +1504,53 @@ The case (in)sensitivity of the matching is determined by |g:lsp_ignorecase|.
 	- `contains`
 	  Only allow completion items that contain the already typed word.
 
+	- `fuzzy`
+	  Match completion items using Vim's |matchfuzzypos()| score. LSP
+	  `filterText` is used when present; otherwise the completion word is
+	  used. Equal scores preserve the incoming order. On Vim versions
+	  without |matchfuzzypos()|, this falls back to the `prefix` filter.
+
 Note: After triggering completion with |i_CTRL-X_CTRL-O|, further filtering is
 only possible by adding to the already typed prefix (even if you're using the
-`contains` filter). If you'd like to retrigger the filtering, you will have to
-press CTRL-X CTRL-O again.
+`contains` or `fuzzy` filter). If you'd like to retrigger the filtering, you
+will have to press CTRL-X CTRL-O again.
 
 sort                                              *vim-lsp-completion-sort*
 
 You can sort the completion items returned from the server by using the `sort`
 key in the server info's `config` |dict|.
-The value of the `sort` key is itself a |dict| containing at least a key
-`max`, which specifies max number of completion items count before giving up
-sorting for performance reason.
+The value of the `sort` key is itself a |dict|. The `max` key specifies the
+maximum number of completion items before giving up sorting for performance
+reasons.
 
-The case (in)sensitivity of the matching is determined by |g:lsp_ignorecase|.
+When `name` is omitted, or is `sortText`, vim-lsp preserves its legacy
+behavior: LSP `sortText` is sorted ascending, falling back to the item label.
+The case (in)sensitivity of this legacy sort is determined by
+|g:lsp_ignorecase|.
 
     Example: >
         'config': { 'sort': { 'max': 100 } }
+<
+Set `name` to `relevance` to rank by fuzzy relevance, then LSP `sortText`,
+buffer locality, shorter filter text, and finally the server's original
+order. This behavior is opt-in. Set `locality` to |v:true| to use occurrences
+within a bounded 2,000-line window as a tie-breaker. Keyword and snippet items
+receive no locality bonus.
+
+    Example: >
+        'config': {
+        \   'filter': { 'name': 'fuzzy' },
+        \   'sort': {
+        \       'name': 'relevance',
+        \       'max': 2000,
+        \       'locality': v:true,
+        \   },
+        \ }
+<
+Relevance ranking uses LSP `filterText` when present, preserves missing
+`sortText` values as ties, and does not mutate the server response. If
+|matchfuzzypos()| is unavailable, it falls back to exact and prefix relevance
+groups. Candidate lists larger than `max` preserve server order.
 
 lsp#register_command({command-name}, {callback})     *lsp#register_command()*
 
