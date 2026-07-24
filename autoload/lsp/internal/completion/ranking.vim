@@ -123,28 +123,18 @@ function! s:collect_locality(first_lnum, last_lnum, cursor_lnum, start_character
     let l:locality = {}
     let l:lnum = a:first_lnum
     for l:line in getline(a:first_lnum, a:last_lnum)
-        let l:byte_index = 0
-        while l:byte_index < strlen(l:line)
-            let l:match = matchstrpos(l:line, '\k\+', l:byte_index)
-            if l:match[1] < 0
-                break
-            endif
-
-            let l:word = l:match[0]
+        if l:lnum == a:cursor_lnum && a:start_character < a:end_character
+            let l:line = strcharpart(l:line, 0, a:start_character)
+                \ . repeat(' ', a:end_character - a:start_character)
+                \ . strcharpart(l:line, a:end_character)
+        endif
+        for l:word in split(l:line, '[^[:keyword:]]\+')
             if has_key(a:candidates, l:word)
-                let l:start = strchars(strpart(l:line, 0, l:match[1]))
-                let l:end = l:start + strchars(l:word)
-                let l:is_current_word = l:lnum == a:cursor_lnum
-                    \ && l:start < a:end_character
-                    \ && l:end > a:start_character
-                if !l:is_current_word
-                    let l:distance = abs(l:lnum - a:cursor_lnum)
-                    let l:score = s:max_locality_lines + 1 - l:distance
-                    let l:locality[l:word] = max([get(l:locality, l:word, 0), l:score])
-                endif
+                let l:distance = abs(l:lnum - a:cursor_lnum)
+                let l:score = s:max_locality_lines + 1 - l:distance
+                let l:locality[l:word] = max([get(l:locality, l:word, 0), l:score])
             endif
-            let l:byte_index = l:match[2]
-        endwhile
+        endfor
         let l:lnum += 1
     endfor
     return l:locality
