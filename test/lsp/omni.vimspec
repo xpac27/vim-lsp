@@ -438,6 +438,169 @@ Describe lsp#omni
             Assert Equals(lsp#omni#get_vim_completion_items(options), want)
         End
 
+        It should support the explicit sortText sort name
+            let items = [
+            \ {'label': 'second', 'sortText': 'b'},
+            \ {'label': 'first', 'sortText': 'a'},
+            \ ]
+            let options = {
+            \ 'server': {
+            \   'name': 'dummy-server',
+            \   'config': {'sort': {'name': 'sortText', 'max': 10}},
+            \ },
+            \ 'position': lsp#get_position(),
+            \ 'response': {'result': items},
+            \ }
+
+            let got = lsp#omni#get_vim_completion_items(options)
+            Assert Equals(map(got.items, {_, item -> item.word}), ['first', 'second'])
+        End
+
+        It should rank list responses by relevance
+            call setline(1, 'fo')
+            let items = [
+            \ {'label': 'f_o_o'},
+            \ {'label': 'foo'},
+            \ ]
+            let options = {
+            \ 'server': {
+            \   'name': 'dummy-server',
+            \   'config': {'sort': {'name': 'relevance', 'max': 10}},
+            \ },
+            \ 'position': {'line': 0, 'character': 2},
+            \ 'response': {'result': items},
+            \ }
+
+            let got = lsp#omni#get_vim_completion_items(options)
+            Assert Equals(map(got.items, {_, item -> item.word}), ['foo', 'f_o_o'])
+            Assert Equals(got.incomplete, 0)
+        End
+
+        It should rank CompletionList responses and preserve isIncomplete
+            call setline(1, 'fo')
+            let items = [
+            \ {'label': 'f_o_o'},
+            \ {'label': 'foo'},
+            \ ]
+            let options = {
+            \ 'server': {
+            \   'name': 'dummy-server',
+            \   'config': {'sort': {'name': 'relevance', 'max': 10}},
+            \ },
+            \ 'position': {'line': 0, 'character': 2},
+            \ 'response': {
+            \   'result': {'items': items, 'isIncomplete': v:true},
+            \ },
+            \ }
+
+            let got = lsp#omni#get_vim_completion_items(options)
+            Assert Equals(map(got.items, {_, item -> item.word}), ['foo', 'f_o_o'])
+            Assert Equals(got.incomplete, v:true)
+        End
+
+        It should keep managed user_data aligned after relevance ranking
+            if !has('patch-8.0.1493')
+                Skip This test requires 'patch-8.0.1493'
+            endif
+
+            call setline(1, 'fo')
+            let weak = {'label': 'f_o_o', 'data': 'weak'}
+            let strong = {'label': 'foo', 'data': 'strong'}
+            let options = {
+            \ 'server': {
+            \   'name': 'dummy-server',
+            \   'config': {'sort': {'name': 'relevance', 'max': 10}},
+            \ },
+            \ 'position': {'line': 0, 'character': 2},
+            \ 'response': {'result': [weak, strong]},
+            \ }
+
+            let got = lsp#omni#get_vim_completion_items(options)
+            let managed = lsp#omni#get_managed_user_data_from_completed_item(got.items[0])
+            Assert Equals(managed.completion_item, strong)
+            Assert Equals(managed.complete_word, 'foo')
+        End
+
+        It should preserve snippet and text-edit correction after ranking
+            if !has('patch-8.0.1493')
+                Skip This test requires 'patch-8.0.1493'
+            endif
+
+            call setline(1, 'obj.fo')
+            let weak = {
+            \ 'label': 'weak',
+            \ 'filterText': 'zz',
+            \ 'textEdit': {
+            \   'range': {
+            \     'start': {'line': 0, 'character': 2},
+            \     'end': {'line': 0, 'character': 6},
+            \   },
+            \   'newText': 'weak',
+            \ },
+            \ }
+            let strong = {
+            \ 'label': 'foo',
+            \ 'filterText': 'j.fo',
+            \ 'insertTextFormat': 2,
+            \ 'textEdit': {
+            \   'range': {
+            \     'start': {'line': 0, 'character': 4},
+            \     'end': {'line': 0, 'character': 6},
+            \   },
+            \   'newText': 'foo(${1:value})',
+            \ },
+            \ }
+            let options = {
+            \ 'server': {
+            \   'name': 'dummy-server',
+            \   'config': {'sort': {'name': 'relevance', 'max': 10}},
+            \ },
+            \ 'position': {'line': 0, 'character': 6},
+            \ 'response': {'result': [weak, strong]},
+            \ }
+
+            let got = lsp#omni#get_vim_completion_items(options)
+            Assert Equals(map(copy(got.items), {_, item -> item.word}), ['j.foo', 'weak'])
+            Assert Equals(got.startcol, 3)
+            let managed = lsp#omni#get_managed_user_data_from_completed_item(got.items[0])
+            Assert Equals(managed.completion_item, strong)
+            Assert Equals(managed.start_character, 4)
+            Assert Equals(managed.complete_word, 'foo(${1:value})')
+        End
+
+        It should not mutate list or CompletionList responses while sorting
+            for config in [
+                \ {'sort': {'max': 10}},
+                \ {'sort': {'name': 'relevance', 'max': 10}},
+                \ ]
+                let items = [
+                \ {'label': 'second', 'sortText': 'b'},
+                \ {'label': 'first', 'sortText': 'a'},
+                \ ]
+                let list_response = {'result': items}
+                let completion_list_response = {
+                \ 'result': {'items': items, 'isIncomplete': v:false},
+                \ }
+                let before_list = deepcopy(list_response)
+                let before_completion_list = deepcopy(completion_list_response)
+                let server = {'name': 'dummy-server', 'config': config}
+
+                call lsp#omni#get_vim_completion_items({
+                \ 'server': server,
+                \ 'position': lsp#get_position(),
+                \ 'response': list_response,
+                \ })
+                call lsp#omni#get_vim_completion_items({
+                \ 'server': server,
+                \ 'position': lsp#get_position(),
+                \ 'response': completion_list_response,
+                \ })
+
+                Assert Equals(list_response, before_list)
+                Assert Equals(completion_list_response, before_completion_list)
+            endfor
+        End
+
         Describe g:lsp_ignorecase
             Before all
                 let saved_ignorecase = get(g:, 'lsp_ignorecase', v:null)

@@ -295,10 +295,10 @@ function! lsp#omni#get_vim_completion_items(options) abort
 
     let l:result = a:options['response']['result']
     if type(l:result) == type([])
-        let l:items = l:result
+        let l:items = copy(l:result)
         let l:incomplete = 0
     elseif type(l:result) == type({})
-        let l:items = l:result['items']
+        let l:items = copy(l:result['items'])
         let l:incomplete = l:result['isIncomplete']
     else
         let l:items = []
@@ -306,13 +306,33 @@ function! lsp#omni#get_vim_completion_items(options) abort
     endif
 
     let l:sort = has_key(l:server, 'config') && has_key(l:server['config'], 'sort') ? l:server['config']['sort'] : v:null
-
-    if len(l:items) > 0 && type(l:sort) == s:t_dict && len(l:items) <= l:sort['max']
-      " If first item contains sortText, maybe we can use sortText
-      call sort(l:items, function('s:sort_by_sorttext'))
-    endif
-
     let l:start_character = l:complete_position['character']
+    let l:ranking_start_character = l:default_start_character
+    for l:completion_item in l:items
+        let l:range = lsp#utils#text_edit#get_range(get(l:completion_item, 'textEdit', {}))
+        if has_key(l:completion_item, 'textEdit') && type(l:completion_item['textEdit']) == s:t_dict && !empty(l:range) && has_key(l:completion_item['textEdit'], 'newText')
+            let l:start_character = min([l:range['start']['character'], l:start_character])
+            let l:ranking_start_character = min([l:range['start']['character'], l:ranking_start_character])
+        endif
+    endfor
+
+    if !empty(l:items) && type(l:sort) == s:t_dict
+        let l:sort_name = get(l:sort, 'name', 'sortText')
+        let l:max = get(l:sort, 'max', len(l:items))
+        if l:sort_name ==? 'relevance'
+            let l:base = strcharpart(l:current_line, l:ranking_start_character, l:complete_position['character'] - l:ranking_start_character)
+            let l:items = lsp#internal#completion#ranking#rank(l:items, {
+                \ 'base': l:base,
+                \ 'bufnr': bufnr('%'),
+                \ 'position': l:complete_position,
+                \ 'start_character': l:ranking_start_character,
+                \ 'locality': get(l:sort, 'locality', v:false),
+                \ 'max': l:max,
+                \ })
+        elseif l:sort_name ==? 'sortText' && len(l:items) <= l:max
+            call sort(l:items, function('s:sort_by_sorttext'))
+        endif
+    endif
 
     let l:start_characters = [] " The mapping of item specific start_character.
     let l:vim_complete_items = []
@@ -329,7 +349,6 @@ function! lsp#omni#get_vim_completion_items(options) abort
         if has_key(l:completion_item, 'textEdit') && type(l:completion_item['textEdit']) == s:t_dict && !empty(l:range) && has_key(l:completion_item['textEdit'], 'newText')
             let l:complete_word = l:completion_item['textEdit']['newText']
             let l:item_start_character = l:range['start']['character']
-            let l:start_character = min([l:item_start_character, l:start_character])
             let l:start_characters += [l:item_start_character]
         elseif has_key(l:completion_item, 'insertText') && !empty(l:completion_item['insertText'])
             let l:complete_word = l:completion_item['insertText']
