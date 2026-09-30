@@ -1,9 +1,18 @@
+scriptencoding utf-8
+
 Describe lsp#omni
 
     let g:lsp_get_vim_completion_item_set_kind = 1
 
     Before each
+        new
+        let saved_ignorecase = g:lsp_ignorecase
         call lsp#omni#_clear_managed_user_data_map()
+    End
+
+    After each
+        let g:lsp_ignorecase = saved_ignorecase
+        bwipe!
     End
 
     Describe lsp#omni#get_vim_completion_items
@@ -540,7 +549,7 @@ Describe lsp#omni
             \ }
             let strong = {
             \ 'label': 'foo',
-            \ 'filterText': 'j.fo',
+            \ 'filterText': 'foo',
             \ 'insertTextFormat': 2,
             \ 'textEdit': {
             \   'range': {
@@ -664,6 +673,9 @@ Describe lsp#omni
 
     Describe lsp#omni#_filter_completion_items
         It should fuzzy filter and score matches
+            if !exists('*matchfuzzypos')
+                Skip Native fuzzy matching is unavailable
+            endif
             let items = [
             \ {'word': 'f_o_o'},
             \ {'word': 'foo'},
@@ -695,7 +707,7 @@ Describe lsp#omni
             \ {'word': 'foo'},
             \ ]
 
-            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy', v:false)
+            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy', {'fuzzy': v:false})
             Assert Equals(map(got, {_, item -> item.word}), ['foo'])
         End
 
@@ -712,6 +724,110 @@ Describe lsp#omni
 
             let got = lsp#omni#_filter_completion_items(converted, 'foo', 'fuzzy')
             Assert Equals(map(got, {_, item -> item.word}), ['zeta', 'alpha'])
+        End
+
+        It matches snippet labels rather than their expansion text
+            let converted = lsp#omni#get_vim_completion_items({
+                \ 'server': {'name': 'dummy-server'},
+                \ 'position': lsp#get_position(),
+                \ 'response': {'result': [
+                \     {'label': 'sysout', 'insertText': 'System.out.println(${0});', 'insertTextFormat': 2},
+                \     {'label': 'unrelated'},
+                \ ]},
+                \ }).items
+            for options in [{}, {'fuzzy': v:false}]
+                let got = lsp#omni#_filter_completion_items(converted, 'sysout', 'fuzzy', options)
+                Assert Equals(map(got, {_, item -> item.abbr}), ['sysout~'])
+            endfor
+        End
+
+        It treats whitespace as an ordered part of the query
+            let items = [{'word': 'bar foo'}, {'word': 'foo bar'}]
+            let got = lsp#omni#_filter_completion_items(items, 'foo bar', 'fuzzy')
+            Assert Equals(map(got, {_, item -> item.word}), ['foo bar'])
+        End
+
+        It preserves a supplied ranking while removing non-matches
+            let items = [{'word': 'f_o_o'}, {'word': 'bar'}, {'word': 'foo'}]
+            let before = deepcopy(items)
+            let got = lsp#omni#_filter_completion_items(items, 'foo', 'fuzzy', {'preserve_order': v:true})
+            if exists('*matchfuzzypos')
+                Assert Equals(map(got, {_, item -> item.word}), ['f_o_o', 'foo'])
+            else
+                Assert Equals(map(got, {_, item -> item.word}), ['foo'])
+            endif
+            Assert Equals(items, before)
+        End
+
+        It preserves server order through filtering when relevance exceeds max
+            call setline(1, 'fo')
+            let converted = lsp#omni#get_vim_completion_items({
+                \ 'server': {'name': 'dummy-server', 'config': {'sort': {'name': 'relevance', 'max': 1}}},
+                \ 'position': {'line': 0, 'character': 2},
+                \ 'response': {'result': [{'label': 'foobar'}, {'label': 'foo'}]},
+                \ }).items
+            let got = lsp#omni#_filter_completion_items(converted, 'fo', 'fuzzy', {'preserve_order': v:true})
+            Assert Equals(map(got, {_, item -> item.word}), ['foobar', 'foo'])
+        End
+
+        It ranks and filters items with different edit starts after multibyte text
+            call setline(1, 'é.fo')
+            let member = {'label': 'foo', 'textEdit': {
+                \ 'range': {'start': {'line': 0, 'character': 2}, 'end': {'line': 0, 'character': 4}},
+                \ 'newText': 'foo',
+                \ }}
+            let other = {'label': 'a', 'textEdit': {
+                \ 'range': {'start': {'line': 0, 'character': 0}, 'end': {'line': 0, 'character': 4}},
+                \ 'newText': 'a',
+                \ }}
+            let converted = lsp#omni#get_vim_completion_items({
+                \ 'server': {'name': 'dummy-server', 'config': {'sort': {'name': 'relevance'}}},
+                \ 'position': {'line': 0, 'character': 4},
+                \ 'response': {'result': [other, member]},
+                \ })
+            Assert Equals(map(copy(converted.items), {_, item -> item.word}), ['é.foo', 'a'])
+            Assert Equals(converted.startcol, 1)
+            let got = lsp#omni#_filter_completion_items(converted.items, 'é.fo', 'fuzzy', {
+                \ 'preserve_order': v:true, 'start_character': 0,
+                \ })
+            Assert Equals(map(copy(got), {_, item -> item.word}), ['é.foo'])
+            Assert Equals(lsp#omni#get_managed_user_data_from_completed_item(got[0]).completion_item, member)
+        End
+
+        It respects ignorecase in the non-native fallback
+            let items = [{'word': 'Foo'}, {'word': 'foo'}]
+            let g:lsp_ignorecase = v:false
+            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy', {'fuzzy': v:false})
+            Assert Equals(map(got, {_, item -> item.word}), ['foo'])
+            let g:lsp_ignorecase = v:true
+            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy', {'fuzzy': v:false})
+            Assert Equals(got, items)
+        End
+
+        It uses native fuzzy case matching independently of ignorecase
+            if !exists('*matchfuzzypos')
+                Skip Native fuzzy matching is unavailable
+            endif
+            let g:lsp_ignorecase = v:false
+            let items = [{'word': 'foobar'}, {'word': 'FooBar'}]
+            let got = lsp#omni#_filter_completion_items(items, 'fo', 'fuzzy')
+            Assert Equals(sort(map(got, {_, item -> item.word})), ['FooBar', 'foobar'])
+        End
+
+        It retains the legacy prefix contains and unknown filters
+            let g:lsp_ignorecase = v:false
+            let items = [{'word': 'barfoo'}, {'word': 'foo'}, {'word': 'Foo'}]
+            let before = deepcopy(items)
+            Assert Equals(lsp#omni#_filter_completion_items(items, 'fo', 'prefix'), [items[1]])
+            Assert Equals(lsp#omni#_filter_completion_items(items, 'fo', 'contains'), items[:1])
+            Assert Equals(lsp#omni#_filter_completion_items(items, 'fo', 'unknown'), items)
+            Assert Equals(items, before)
+        End
+
+        It preserves all candidates for an empty query
+            let items = [{'word': 'longer'}, {'word': 'x'}]
+            Assert Equals(lsp#omni#_filter_completion_items(items, '', 'fuzzy'), items)
+            Assert Equals(lsp#omni#_filter_completion_items([], 'fo', 'fuzzy'), [])
         End
     End
 End

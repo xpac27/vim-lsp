@@ -1487,28 +1487,35 @@ completion filter using the `filter` key in the server info's `config` |dict|.
 The value of the `filter` key is itself a |dict| containing at least a key
 `name`, which specifies which filter to use.
 
-The case (in)sensitivity of the matching is determined by |g:lsp_ignorecase|.
+For `prefix` and `contains`, case sensitivity is determined by
+|g:lsp_ignorecase|.
 
     Example: >
         'config': { 'filter': { 'name': 'none' } }
 <
     Available filters are:
-        - `none` (default)
+        - `none`
           Do not filter completion items, use all items returned from the
           language server.
 
-        - `prefix`
-          Only allow completion items that are a prefix of the already typed
-          word.
+        - `prefix` (default)
+          Only allow completion items that begin with the already typed word.
 
 	- `contains`
 	  Only allow completion items that contain the already typed word.
 
 	- `fuzzy`
 	  Match completion items using Vim's |matchfuzzypos()| score. LSP
-	  `filterText` is used when present; otherwise the completion word is
-	  used. Equal scores preserve the incoming order. On Vim versions
-	  without |matchfuzzypos()|, this falls back to the `prefix` filter.
+	  `filterText` is used when non-empty; otherwise the LSP label is
+	  used, including for snippets. Items without LSP metadata use the
+	  completion word. Characters (including spaces) must match in order.
+	  Native fuzzy matching uses |matchfuzzypos()|'s case and scoring rules;
+	  it does not use |g:lsp_ignorecase|. On Vim/Neovim versions
+	  without |matchfuzzypos()|, matching falls back to prefixes and obeys
+	  |g:lsp_ignorecase|.
+	  Equal scores preserve the incoming order. With `relevance` sorting,
+	  this filter only removes non-matches, preserving the ranker's order
+	  and its `max` limit. Each item's text edit determines its query start.
 
 Note: After triggering completion with |i_CTRL-X_CTRL-O|, further filtering is
 only possible by adding to the already typed prefix (even if you're using the
@@ -1533,9 +1540,20 @@ The case (in)sensitivity of this legacy sort is determined by
 <
 Set `name` to `relevance` to rank by fuzzy relevance, then LSP `sortText`,
 buffer locality, shorter filter text, and finally the server's original
-order. This behavior is opt-in. Set `locality` to |v:true| to use occurrences
-within a bounded 2,000-line window as a tie-breaker. Keyword and snippet items
-receive no locality bonus.
+order. This behavior is opt-in and does not remove candidates. A fuzzy match
+always ranks above a non-match, even when Vim assigns it a negative score.
+
+When the server supplies any non-empty `sortText`, missing or empty sort keys
+fall back to the item's label. These keys are compared case-sensitively.
+When no item has a sort key, this tie-breaker is skipped. An empty query skips
+the length tie-breaker, preserving server order unless sort keys or locality
+give a reason to reorder it.
+
+Set `locality` to |v:true| to use whole keyword occurrences in the current
+buffer within a bounded 2,000-line window as a tie-breaker. Nearer lines rank
+higher. This uses the buffer's 'iskeyword' and excludes the text being typed.
+Keyword and snippet items receive no locality bonus. Locality is a textual
+heuristic; it does not infer language scope.
 
     Example: >
         'config': {
@@ -1547,10 +1565,20 @@ receive no locality bonus.
         \   },
         \ }
 <
-Relevance ranking uses LSP `filterText` when present, preserves missing
-`sortText` values as ties, and does not mutate the server response. If
-|matchfuzzypos()| is unavailable, it falls back to exact and prefix relevance
-groups. Candidate lists larger than `max` preserve server order.
+Relevance ranking uses non-empty LSP `filterText`, falling back to the label,
+and does not mutate the server response. Items with `textEdit` use the text
+from their own edit start to the cursor as the query; other items use the
+server's `refresh_pattern`. Matching uses the same rules as the `fuzzy`
+filter. If |matchfuzzypos()| is unavailable, ranking falls back to exact,
+case-correct prefix, and case-insensitive prefix groups (the last only when
+|g:lsp_ignorecase| is set). Candidate lists larger than `max` preserve server
+order. Omitting `max` allows ranking lists of any size.
+
+Completion plugins that call lsp#omni#get_vim_completion_items() receive the
+ranked items too, but their own filtering or sorting can change that order.
+For example, an asyncomplete preprocessor that sorts LSP items alphabetically
+will override relevance ranking. Such integrations must preserve the order
+of the returned LSP items to retain these tie-breakers.
 
 lsp#register_command({command-name}, {callback})     *lsp#register_command()*
 

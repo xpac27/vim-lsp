@@ -127,47 +127,61 @@ function! s:compare_fuzzy_filter_records(left, right) abort
     return a:left['index'] == a:right['index'] ? 0 : a:left['index'] < a:right['index'] ? -1 : 1
 endfunction
 
-function! s:fuzzy_filter(items, last_typed_word, use_matchfuzzy) abort
+function! s:fuzzy_filter(items, last_typed_word, options) abort
     if empty(a:items) || empty(a:last_typed_word)
         return copy(a:items)
     endif
-    if !a:use_matchfuzzy || !exists('*matchfuzzypos')
-        return filter(copy(a:items), {_, item -> s:prefix_filter(item, a:last_typed_word)})
-    endif
-
     let l:records = []
+    let l:groups = {}
     for l:index in range(len(a:items))
         let l:item = a:items[l:index]
-        let l:filter_text = s:get_filter_text(l:item)
-        call add(l:records, {
+        let l:managed = lsp#omni#get_managed_user_data_from_completed_item(l:item)
+        let l:raw = get(l:managed, 'completion_item', {})
+        " Match the same LSP text as the ranker, not snippet expansion text or
+        " the prefix added to Vim's word to accommodate another item's edit.
+        let l:text = get(l:raw, 'filterText', '')
+        if empty(l:text)
+            let l:text = get(l:raw, 'label', s:get_filter_label(l:item))
+        endif
+        let l:base = a:last_typed_word
+        if has_key(a:options, 'start_character') && has_key(l:managed, 'start_character')
+            let l:offset = max([0, l:managed['start_character'] - a:options['start_character']])
+            let l:base = strcharpart(l:base, l:offset)
+        endif
+        let l:record = {
             \ 'index': l:index,
             \ 'item': l:item,
-            \ 'text': empty(l:filter_text) ? s:get_filter_label(l:item) : l:filter_text,
-            \ })
+            \ 'text': l:text,
+            \ }
+        call add(l:records, l:record)
+        if !has_key(l:groups, l:base)
+            let l:groups[l:base] = []
+        endif
+        call add(l:groups[l:base], l:record)
     endfor
 
-    let l:result = matchfuzzypos(l:records, a:last_typed_word, {'key': 'text'})
-    let l:matches = []
-    if !empty(l:result[0])
-        for l:index in range(len(l:result[0]))
-            call add(l:matches, {
-                \ 'index': l:result[0][l:index]['index'],
-                \ 'item': l:result[0][l:index]['item'],
-                \ 'score': l:result[2][l:index],
-                \ })
-        endfor
+    let l:fuzzy = get(a:options, 'fuzzy', v:true) && exists('*matchfuzzypos')
+    for [l:base, l:group] in items(l:groups)
+        call lsp#internal#completion#matching#score(l:group, l:base, l:fuzzy)
+    endfor
+    let l:matches = filter(l:records, {_, record -> record['matched']})
+    " A second score sort would discard relevance tie-breakers and bypass max.
+    if l:fuzzy && !get(a:options, 'preserve_order', v:false)
+        call sort(l:matches, function('s:compare_fuzzy_filter_records'))
     endif
-    call sort(l:matches, function('s:compare_fuzzy_filter_records'))
     return map(l:matches, {_, record -> record['item']})
 endfunction
 
+" The optional fuzzy-filter options contain: fuzzy (enable native matching),
+" preserve_order (items are already ranked), and start_character (the common
+" completion start, needed to derive queries for items with different edits).
 function! lsp#omni#_filter_completion_items(items, last_typed_word, filter_name, ...) abort
     if a:filter_name ==? 'prefix'
         return filter(copy(a:items), {_, item -> s:prefix_filter(item, a:last_typed_word)})
     elseif a:filter_name ==? 'contains'
         return filter(copy(a:items), {_, item -> s:contains_filter(item, a:last_typed_word)})
     elseif a:filter_name ==? 'fuzzy'
-        return s:fuzzy_filter(a:items, a:last_typed_word, get(a:, 1, v:true))
+        return s:fuzzy_filter(a:items, a:last_typed_word, get(a:, 1, {}))
     endif
     return copy(a:items)
 endfunction
@@ -189,7 +203,12 @@ function! s:display_completions(timer, info) abort
     let l:last_typed_word = strpart(l:current_line, s:completion['startcol'] - 1)
 
     let l:filter = has_key(l:server_info, 'config') && has_key(l:server_info['config'], 'filter') ? l:server_info['config']['filter'] : { 'name': 'prefix' }
-    let s:completion['matches'] = lsp#omni#_filter_completion_items(s:completion['matches'], l:last_typed_word, l:filter['name'])
+    let l:sort = get(get(l:server_info, 'config', {}), 'sort', {})
+    let l:filter_options = {
+        \ 'preserve_order': type(l:sort) == s:t_dict && get(l:sort, 'name', '') ==? 'relevance',
+        \ 'start_character': strchars(strpart(l:current_line, 0, s:completion['startcol'] - 1)),
+        \ }
+    let s:completion['matches'] = lsp#omni#_filter_completion_items(s:completion['matches'], l:last_typed_word, l:filter['name'], l:filter_options)
     if l:filter['name'] ==? 'prefix'
         if has_key(s:pair, l:last_typed_word[0])
             let [l:lhs, l:rhs] = [l:last_typed_word[0], s:pair[l:last_typed_word[0]]]
@@ -357,25 +376,17 @@ function! lsp#omni#get_vim_completion_items(options) abort
 
     let l:sort = has_key(l:server, 'config') && has_key(l:server['config'], 'sort') ? l:server['config']['sort'] : v:null
     let l:start_character = l:complete_position['character']
-    let l:ranking_start_character = l:default_start_character
-    for l:completion_item in l:items
-        let l:range = lsp#utils#text_edit#get_range(get(l:completion_item, 'textEdit', {}))
-        if has_key(l:completion_item, 'textEdit') && type(l:completion_item['textEdit']) == s:t_dict && !empty(l:range) && has_key(l:completion_item['textEdit'], 'newText')
-            let l:start_character = min([l:range['start']['character'], l:start_character])
-            let l:ranking_start_character = min([l:range['start']['character'], l:ranking_start_character])
-        endif
-    endfor
-
     if !empty(l:items) && type(l:sort) == s:t_dict
         let l:sort_name = get(l:sort, 'name', 'sortText')
         let l:max = get(l:sort, 'max', len(l:items))
         if l:sort_name ==? 'relevance'
-            let l:base = strcharpart(l:current_line, l:ranking_start_character, l:complete_position['character'] - l:ranking_start_character)
+            let l:base = strcharpart(l:current_line, l:default_start_character, l:complete_position['character'] - l:default_start_character)
             let l:items = lsp#internal#completion#ranking#rank(l:items, {
                 \ 'base': l:base,
+                \ 'line': l:current_line,
                 \ 'bufnr': bufnr('%'),
                 \ 'position': l:complete_position,
-                \ 'start_character': l:ranking_start_character,
+                \ 'start_character': l:default_start_character,
                 \ 'locality': get(l:sort, 'locality', v:false),
                 \ 'max': l:max,
                 \ })
@@ -399,6 +410,7 @@ function! lsp#omni#get_vim_completion_items(options) abort
         if has_key(l:completion_item, 'textEdit') && type(l:completion_item['textEdit']) == s:t_dict && !empty(l:range) && has_key(l:completion_item['textEdit'], 'newText')
             let l:complete_word = l:completion_item['textEdit']['newText']
             let l:item_start_character = l:range['start']['character']
+            let l:start_character = min([l:item_start_character, l:start_character])
             let l:start_characters += [l:item_start_character]
         elseif has_key(l:completion_item, 'insertText') && !empty(l:completion_item['insertText'])
             let l:complete_word = l:completion_item['insertText']
